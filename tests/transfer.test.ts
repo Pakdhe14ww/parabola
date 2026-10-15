@@ -33,9 +33,8 @@ vi.mock("../src/iris/poll.js", () => ({
 }));
 
 const { transfer, completeMint, resolveBurn } = await import("../src/transfer.js");
-const { TransferError, SubmissionTimeoutError, AttestationNotReadyError } = await import(
-  "../src/errors.js"
-);
+const { TransferError, SubmissionTimeoutError, AttestationNotReadyError, AmountPrecisionError } =
+  await import("../src/errors.js");
 const { encodeStellarForwardHook } = await import("../src/utils/encoding.js");
 
 const FORWARD_RECIPIENT = "GCY3PLGZQZWVKQELW7GCHQVLVZGRMGI5R4HODX6QZM7ETJSPHBFVJPY2";
@@ -664,5 +663,53 @@ describe("transfer fast/standard fee handling", () => {
 
     expect(result.transferMode).toBe("fast");
     expect(result.fee).toBe("0.1");
+  });
+});
+
+describe("transfer amount precision pre-flight", () => {
+  it("rejects a Stellar->Arc amount with more precision than Arc supports, before anything moves", async () => {
+    await expect(
+      transfer({
+        from: "stellar",
+        to: "arc",
+        amount: "1.1234567",
+        recipient: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        speed: "standard",
+        signer: stellarSigner,
+        options: { destinationSigner: arcSigner },
+      }),
+    ).rejects.toBeInstanceOf(AmountPrecisionError);
+
+    expect(approveUsdcOnStellar).not.toHaveBeenCalled();
+    expect(burnUsdcOnStellar).not.toHaveBeenCalled();
+    expect(checkStellarRecipientReady).not.toHaveBeenCalled();
+  });
+
+  it("accepts the same amount when the extra places are trailing zeros", async () => {
+    await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "1.1230000",
+      recipient: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      speed: "standard",
+      signer: stellarSigner,
+      options: { destinationSigner: arcSigner },
+    });
+
+    expect(burnUsdcOnStellar).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves an Arc->Stellar amount of six decimals or fewer untouched", async () => {
+    await transfer({
+      from: "arc",
+      to: "stellar",
+      amount: "1.123456",
+      recipient: "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI",
+      speed: "standard",
+      signer: arcSigner,
+      options: { destinationSigner: stellarSigner },
+    });
+
+    expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledTimes(1);
   });
 });

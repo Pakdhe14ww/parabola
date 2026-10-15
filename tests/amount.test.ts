@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { decimalsForChain, toRawAmount, fromRawAmount } from "../src/utils/amount.js";
+import { AmountPrecisionError } from "../src/errors.js";
+import {
+  decimalsForChain,
+  toRawAmount,
+  fromRawAmount,
+  significantDecimals,
+  assertAmountFitsDestination,
+} from "../src/utils/amount.js";
 import { ARC_TESTNET, STELLAR_TESTNET } from "../src/constants.js";
 
 describe("decimalsForChain", () => {
@@ -49,5 +56,55 @@ describe("fromRawAmount", () => {
       const raw = toRawAmount("42.5", chain);
       expect(fromRawAmount(raw, chain)).toBe("42.5");
     }
+  });
+});
+
+
+describe("significantDecimals", () => {
+  it("counts fractional places that carry meaning", () => {
+    expect(significantDecimals("1.1234567")).toBe(7);
+    expect(significantDecimals("0.1")).toBe(1);
+  });
+
+  it("ignores trailing zeros padded onto an amount", () => {
+    expect(significantDecimals("1.1230000")).toBe(3);
+    expect(significantDecimals("1.100")).toBe(1);
+  });
+
+  it("returns 0 for a whole number", () => {
+    expect(significantDecimals("10")).toBe(0);
+    expect(significantDecimals("10.0000000")).toBe(0);
+  });
+});
+
+describe("assertAmountFitsDestination", () => {
+  it("rejects an amount with more precision than the destination supports", () => {
+    expect(() => assertAmountFitsDestination("1.1234567", "arc")).toThrow(AmountPrecisionError);
+  });
+
+  it("accepts an amount whose trailing zeros pad it past the destination's decimals", () => {
+    expect(() => assertAmountFitsDestination("1.1230000", "arc")).not.toThrow();
+  });
+
+  it("accepts anything the destination can already represent", () => {
+    expect(() => assertAmountFitsDestination("1.123456", "arc")).not.toThrow();
+    expect(() => assertAmountFitsDestination("1.1234567", "stellar")).not.toThrow();
+  });
+
+  it("names the amount, the precision found and the destination's decimals", () => {
+    const error = (() => {
+      try {
+        assertAmountFitsDestination("1.1234567", "arc");
+      } catch (err) {
+        return err as AmountPrecisionError;
+      }
+      return undefined;
+    })();
+
+    expect(error?.name).toBe("AmountPrecisionError");
+    expect(error?.amount).toBe("1.1234567");
+    expect(error?.precision).toBe(7);
+    expect(error?.supportedDecimals).toBe(6);
+    expect(error?.message).toMatch(/1\.1234567 has 7 decimal places/);
   });
 });

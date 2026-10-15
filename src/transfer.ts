@@ -22,8 +22,18 @@ import {
   DEFAULT_POLL_TIMEOUT_MS,
 } from "./constants.js";
 import { fetchFastTransferFeeBps, pollForAttestation, getAttestation } from "./iris/poll.js";
-import { TransferError, SubmissionTimeoutError, AttestationNotReadyError } from "./errors.js";
-import { toRawAmount, fromRawAmount, decimalsForChain } from "./utils/amount.js";
+import {
+  TransferError,
+  SubmissionTimeoutError,
+  AttestationNotReadyError,
+  AmountPrecisionError,
+} from "./errors.js";
+import {
+  toRawAmount,
+  fromRawAmount,
+  decimalsForChain,
+  assertAmountFitsDestination,
+} from "./utils/amount.js";
 import { parseUsdcAmount, stellarAddressToBytes32, evmAddressToBytes32, encodeStellarForwardHook } from "./utils/encoding.js";
 import { decodeCctpMessage } from "./utils/message.js";
 import { approveUsdcOnArc, burnUsdcOnArcWithStellarForward, receiveMessageOnArc } from "./chains/arc.js";
@@ -41,6 +51,12 @@ function domainFor(chain: "arc" | "stellar"): number {
 }
 
 export async function transfer(params: TransferParams): Promise<TransferResult> {
+  // Cheapest check first, and the only one that can still be answered by asking the caller to
+  // change their input: everything below this point either spends a transaction or has already
+  // spent one. Amount parsing happens per-chain and would otherwise let a source-precision
+  // amount through to be truncated on arrival without the caller hearing about it.
+  assertAmountFitsDestination(params.amount, params.to);
+
   const start = Date.now();
   const options = params.options ?? {};
   const network: Network = params.network ?? "mainnet";

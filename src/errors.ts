@@ -84,3 +84,31 @@ export class SubmissionTimeoutError extends Error {
     this.hash = hash;
   }
 }
+
+/**
+ * Thrown by transfer() when the amount carries more decimal places than the destination chain's
+ * USDC supports. The source chain parses the amount at its own precision, so a Stellar-sourced
+ * "1.1234567" burns seven decimals' worth of USDC while Arc's six-decimal token is the thing that
+ * has to receive it — the difference is resolved by truncation somewhere downstream, and the
+ * caller who typed the amount is never told. Thrown before the approve and the burn, so nothing
+ * has moved and the caller can adjust the amount.
+ *
+ * A separate class from the recipient-readiness failure so a caller can tell "your amount does
+ * not fit the destination" apart from "the destination cannot receive" without matching messages.
+ */
+export class AmountPrecisionError extends Error {
+  /** The amount as the caller passed it. */
+  readonly amount: string;
+  /** Significant decimal places found in the amount (trailing zeros are not counted). */
+  readonly precision: number;
+  /** Decimal places the destination chain's USDC supports. */
+  readonly supportedDecimals: number;
+
+  constructor(message: string, amount: string, precision: number, supportedDecimals: number) {
+    super(message);
+    this.name = "AmountPrecisionError";
+    this.amount = amount;
+    this.precision = precision;
+    this.supportedDecimals = supportedDecimals;
+  }
+}
