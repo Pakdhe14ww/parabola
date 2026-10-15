@@ -26,7 +26,12 @@ import { TransferError, SubmissionTimeoutError, AttestationNotReadyError } from 
 import { toRawAmount, fromRawAmount, decimalsForChain } from "./utils/amount.js";
 import { parseUsdcAmount, stellarAddressToBytes32, evmAddressToBytes32, encodeStellarForwardHook } from "./utils/encoding.js";
 import { decodeCctpMessage } from "./utils/message.js";
-import { approveUsdcOnArc, burnUsdcOnArcWithStellarForward, receiveMessageOnArc } from "./chains/arc.js";
+import {
+  approveUsdcOnArc,
+  burnUsdcOnArcWithStellarForward,
+  readUsdcAllowanceOnArc,
+  receiveMessageOnArc,
+} from "./chains/arc.js";
 import {
   approveUsdcOnStellar,
   burnUsdcOnStellar,
@@ -138,6 +143,35 @@ export async function transfer(params: TransferParams): Promise<TransferResult> 
   }
 }
 
+/**
+ * Approves Arc's TokenMessengerV2 to spend `amountRaw` only when it cannot already spend it.
+ *
+ * The exact-amount approval policy is unchanged: a partial allowance is still replaced with the
+ * exact amount rather than topped up, so no call here can leave a standing allowance larger than
+ * the transfer it belongs to.
+ *
+ * A failed allowance read submits the approve (fail closed). Skipping it on a read error would
+ * mean discovering the missing allowance inside a burn that has already been prepared, and on a
+ * chain where the approve is what makes the burn possible, the extra write is the cheaper mistake.
+ */
+async function approveUsdcOnArcIfNeeded(
+  signer: ArcSigner,
+  amountRaw: bigint,
+  network: Network,
+  rpcUrl?: string,
+): Promise<void> {
+  const owner = signer.walletClient.account?.address;
+  if (owner) {
+    try {
+      const allowance = await readUsdcAllowanceOnArc(owner, network, rpcUrl);
+      if (allowance >= amountRaw) return;
+    } catch {
+      // fall through to the approve
+    }
+  }
+  await approveUsdcOnArc(signer, amountRaw, network, rpcUrl);
+}
+
 async function burn(args: {
   params: TransferParams;
   network: Network;
@@ -161,7 +195,13 @@ async function burn(args: {
     // approved to spend at least amountRaw before depositForBurnWithHook will
     // succeed. Approving the exact amount per call avoids leaving a standing
     // allowance beyond what this transfer needs.
-    await approveUsdcOnArc(signer, amountRaw, network, arcRpcUrl);
+    //
+    // The approve is only submitted when the existing allowance does not already cover this
+    // transfer. A hot wallet running frequent transfers keeps a leftover allowance from the
+    // previous exact-amount approve (TokenMessengerV2 pulls the amount, it does not clear the
+    // rest), so without this every transfer pays for a redundant approve on the same transfer
+    // that is about to spend the allowance anyway. The read is free next to a write.
+    await approveUsdcOnArcIfNeeded(signer, amountRaw, network, arcRpcUrl);
     return runBurn(() => {
       const hookData = encodeStellarForwardHook(params.recipient);
       const mintRecipientBytes32 = stellarAddressToBytes32(stellarConfig(network).cctpForwarder);

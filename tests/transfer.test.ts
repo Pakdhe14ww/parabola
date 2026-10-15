@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const approveUsdcOnArc = vi.fn();
+const readUsdcAllowanceOnArc = vi.fn();
 const burnUsdcOnArc = vi.fn();
 const burnUsdcOnArcWithStellarForward = vi.fn();
 const receiveMessageOnArc = vi.fn();
@@ -14,6 +15,7 @@ const getAttestation = vi.fn();
 
 vi.mock("../src/chains/arc.js", () => ({
   approveUsdcOnArc: (...args: unknown[]) => approveUsdcOnArc(...args),
+  readUsdcAllowanceOnArc: (...args: unknown[]) => readUsdcAllowanceOnArc(...args),
   burnUsdcOnArc: (...args: unknown[]) => burnUsdcOnArc(...args),
   burnUsdcOnArcWithStellarForward: (...args: unknown[]) => burnUsdcOnArcWithStellarForward(...args),
   receiveMessageOnArc: (...args: unknown[]) => receiveMessageOnArc(...args),
@@ -62,12 +64,17 @@ function buildBurnMessage(options: { forwardRecipient?: string } = {}): `0x${str
   return `0x${Buffer.concat([header, body, hook]).toString("hex")}`;
 }
 
-const arcSigner = { walletClient: {} } as any;
+// An ArcSigner always carries an account: writeAndWait refuses to send otherwise, and the
+// allowance read is scoped to that account's address.
+const arcSigner = {
+  walletClient: { account: { address: "0x1111111111111111111111111111111111111111" } },
+} as any;
 const stellarSigner = { publicKey: "GABCD" } as any;
 
 beforeEach(() => {
   vi.clearAllMocks();
   approveUsdcOnArc.mockResolvedValue("0xapprovehash");
+  readUsdcAllowanceOnArc.mockResolvedValue(0n);
   burnUsdcOnArc.mockResolvedValue("0xburnhash");
   burnUsdcOnArcWithStellarForward.mockResolvedValue("0xburnhookhash");
   approveUsdcOnStellar.mockResolvedValue("stellarapprovehash");
@@ -664,5 +671,77 @@ describe("transfer fast/standard fee handling", () => {
 
     expect(result.transferMode).toBe("fast");
     expect(result.fee).toBe("0.1");
+  });
+});
+
+describe("transfer (Arc -> Stellar) approve skipping", () => {
+  const arcToStellar = {
+    from: "arc",
+    to: "stellar",
+    amount: "10",
+    recipient: "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI",
+    speed: "standard",
+    signer: arcSigner,
+    options: { destinationSigner: stellarSigner },
+  } as const;
+
+  it("skips the approve transaction when the existing allowance already covers the burn", async () => {
+    readUsdcAllowanceOnArc.mockResolvedValue(10_000_000n);
+
+    const result = await transfer(arcToStellar);
+
+    expect(readUsdcAllowanceOnArc).toHaveBeenCalledTimes(1);
+    expect(approveUsdcOnArc).not.toHaveBeenCalled();
+    expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledTimes(1);
+    expect(result.burnTxHash).toBe("0xburnhookhash");
+  });
+
+  it("submits the exact-amount approve when the allowance is short", async () => {
+    readUsdcAllowanceOnArc.mockResolvedValue(9_999_999n);
+
+    await transfer(arcToStellar);
+
+    expect(approveUsdcOnArc).toHaveBeenCalledTimes(1);
+    expect(approveUsdcOnArc.mock.calls[0]?.[1]).toBe(10_000_000n);
+    expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledTimes(1);
+  });
+
+  it("submits the approve when there is no allowance at all", async () => {
+    readUsdcAllowanceOnArc.mockResolvedValue(0n);
+
+    await transfer(arcToStellar);
+
+    expect(approveUsdcOnArc).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed: a failed allowance read still submits the approve", async () => {
+    readUsdcAllowanceOnArc.mockRejectedValue(new Error("rpc unreachable"));
+
+    await transfer(arcToStellar);
+
+    expect(approveUsdcOnArc).toHaveBeenCalledTimes(1);
+    expect(burnUsdcOnArcWithStellarForward).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not read the Arc allowance for a Stellar-sourced transfer", async () => {
+    readUsdcAllowanceOnArc.mockResolvedValue(10_000_000n);
+    burnUsdcOnStellar.mockResolvedValue("stellarburnhash");
+    pollForAttestation.mockResolvedValue({
+      message: buildBurnMessage({ forwardRecipient: undefined }),
+      attestation: "0xattestation",
+    });
+
+    await transfer({
+      from: "stellar",
+      to: "arc",
+      amount: "10",
+      recipient: "0x1111111111111111111111111111111111111111",
+      speed: "standard",
+      signer: stellarSigner,
+      options: { destinationSigner: arcSigner },
+    });
+
+    expect(readUsdcAllowanceOnArc).not.toHaveBeenCalled();
+    expect(approveUsdcOnStellar).toHaveBeenCalledTimes(1);
   });
 });

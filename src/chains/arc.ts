@@ -91,6 +91,16 @@ const erc20Abi = [
     ],
     outputs: [{ name: "", type: "bool" }],
   },
+  {
+    type: "function",
+    name: "allowance",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
 ] as const;
 
 /**
@@ -154,6 +164,28 @@ export async function approveUsdcOnArc(
     network,
     rpcUrl,
   );
+}
+
+/**
+ * Reads the USDC allowance the signer's account has granted to Arc's TokenMessengerV2.
+ *
+ * A read, unlike the approve write, costs nothing but a round trip, so a caller that is about
+ * to approve can check first and skip a redundant transaction when a previous transfer already
+ * left an allowance that covers this one. This is the raw on-chain value: it says nothing about
+ * the signer's balance, and an allowance can only be spent once.
+ */
+export async function readUsdcAllowanceOnArc(
+  owner: `0x${string}`,
+  network: Network,
+  rpcUrl?: string,
+): Promise<bigint> {
+  const arc = arcConfig(network);
+  return publicClient(network, rpcUrl).readContract({
+    address: arc.usdc as Hex,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: [owner, arc.tokenMessengerV2 as Hex],
+  });
 }
 
 /** Burns USDC on Arc via TokenMessengerV2.depositForBurn for a plain (non-Stellar) destination. */

@@ -1,17 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const waitForTransactionReceipt = vi.fn();
+const readContract = vi.fn();
 
 vi.mock("viem", async (importOriginal) => {
   const actual = await importOriginal<typeof import("viem")>();
   return {
     ...actual,
-    createPublicClient: () => ({ waitForTransactionReceipt }),
+    createPublicClient: () => ({ waitForTransactionReceipt, readContract }),
   };
 });
 
 const {
   approveUsdcOnArc,
+  readUsdcAllowanceOnArc,
   burnUsdcOnArc,
   burnUsdcOnArcWithStellarForward,
   receiveMessageOnArc,
@@ -35,6 +37,7 @@ function makeSigner() {
 beforeEach(() => {
   vi.clearAllMocks();
   waitForTransactionReceipt.mockResolvedValue({ status: "success" });
+  readContract.mockResolvedValue(0n);
 });
 
 describe("approveUsdcOnArc", () => {
@@ -151,5 +154,21 @@ describe("signer validation", () => {
     await expect(approveUsdcOnArc(signer, 1n, "testnet")).rejects.toThrow(
       "ArcSigner's walletClient must have an account attached",
     );
+  });
+});
+
+
+describe("readUsdcAllowanceOnArc", () => {
+  it("reads the USDC allowance the owner granted to Arc's TokenMessengerV2", async () => {
+    const owner = "0x2222222222222222222222222222222222222222" as const;
+    readContract.mockResolvedValue(10_000_000n);
+
+    const allowance = await readUsdcAllowanceOnArc(owner, "testnet");
+
+    expect(allowance).toBe(10_000_000n);
+    const call = readContract.mock.calls[0]?.[0];
+    expect(call.address).toBe(ARC_TESTNET.usdc);
+    expect(call.functionName).toBe("allowance");
+    expect(call.args).toEqual([owner, ARC_TESTNET.tokenMessengerV2]);
   });
 });
