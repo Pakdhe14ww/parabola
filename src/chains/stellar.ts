@@ -7,7 +7,14 @@ import {
   scValToNative,
   rpc,
 } from "@stellar/stellar-sdk";
-import { stellarConfig, STELLAR_TX_TIMEOUT_SECONDS, STELLAR_CONFIRMATION_TIMEOUT_MS, STELLAR_INCLUSION_FEE } from "../constants.js";
+import {
+  stellarConfig,
+  STELLAR_TX_TIMEOUT_SECONDS,
+  STELLAR_CONFIRMATION_TIMEOUT_MS,
+  STELLAR_CONFIRMATION_RETRY_DELAY_MS,
+  STELLAR_MAX_CONSECUTIVE_RPC_FAILURES,
+  STELLAR_INCLUSION_FEE,
+} from "../constants.js";
 import type { StellarSigner, Network } from "../types.js";
 import { SubmissionTimeoutError } from "../errors.js";
 
@@ -70,8 +77,23 @@ async function invokeContract(
 
 async function pollTransactionStatus(server: rpc.Server, hash: string): Promise<string> {
   const deadline = Date.now() + STELLAR_CONFIRMATION_TIMEOUT_MS;
+  let consecutiveFailures = 0;
   while (Date.now() < deadline) {
-    const result = await server.getTransaction(hash);
+    let result: rpc.Api.GetTransactionResponse;
+    try {
+      result = await server.getTransaction(hash);
+    } catch {
+      // A transient RPC failure (dropped connection, 5xx from the Soroban RPC) says nothing
+      // about the transaction's outcome, and the transaction was already broadcast, so its
+      // hash is the caller's only handle on it. Retry with a short backoff instead of letting
+      // an error that does not carry the hash escape. Sustained failure is not a blip: it
+      // ends the poll with the hash attached rather than waiting out the deadline.
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= STELLAR_MAX_CONSECUTIVE_RPC_FAILURES) break;
+      await new Promise((resolve) => setTimeout(resolve, STELLAR_CONFIRMATION_RETRY_DELAY_MS));
+      continue;
+    }
+    consecutiveFailures = 0;
     if (result.status === "SUCCESS") return hash;
     if (result.status === "FAILED") {
       throw new Error(`Stellar transaction ${hash} failed`);
@@ -79,10 +101,18 @@ async function pollTransactionStatus(server: rpc.Server, hash: string): Promise<
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
   // The transaction was broadcast (this hash came from a successful sendTransaction);
-  // confirmation did not arrive within the timeout. This differs from never having been
-  // submitted, so the hash is surfaced for callers to act on instead of being discarded
+  // confirmation did not arrive within the timeout, whether because the RPC never returned
+  // a usable response or because the deadline passed first. This differs from never having
+  // been submitted, so the hash is surfaced for callers to act on instead of being discarded
   // in a bare error.
-  throw new SubmissionTimeoutError(`Timed out waiting for Stellar transaction ${hash} to confirm`, hash);
+  const reason =
+    consecutiveFailures >= STELLAR_MAX_CONSECUTIVE_RPC_FAILURES
+      ? `after ${consecutiveFailures} consecutive RPC failures`
+      : "before the confirmation deadline";
+  throw new SubmissionTimeoutError(
+    `Gave up waiting for Stellar transaction ${hash} to confirm ${reason}`,
+    hash,
+  );
 }
 
 /**

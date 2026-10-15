@@ -6,7 +6,8 @@ import {
   approveUsdcOnStellar,
   checkStellarRecipientReady,
 } from "../src/chains/stellar.js";
-import { STELLAR_TESTNET } from "../src/constants.js";
+import { STELLAR_TESTNET, STELLAR_MAX_CONSECUTIVE_RPC_FAILURES } from "../src/constants.js";
+import { SubmissionTimeoutError } from "../src/errors.js";
 import { stellarAddressToBytes32 } from "../src/utils/encoding.js";
 
 function contractIdOf(contract: Contract): string {
@@ -240,4 +241,68 @@ describe("mintAndForwardOnStellar (CctpForwarder.mint_and_forward)", () => {
     expect(contractIdOf(callSpy.mock.instances[0] as unknown as Contract)).toBe(STELLAR_TESTNET.cctpForwarder);
     expect(callSpy.mock.calls[0]?.[0]).toBe("mint_and_forward");
   });
+});
+
+
+describe("confirmation polling tolerance", () => {
+  const TRANSIENT = "connect ECONNRESET";
+
+  function mockSubmitWithTransactionSequence(
+    answers: Array<{ status: string } | Error>,
+  ) {
+    const signerKeypair = mockHappyPathRpc();
+    let calls = 0;
+    vi.spyOn(rpc.Server.prototype, "getTransaction").mockImplementation(async () => {
+      const answer = answers[Math.min(calls, answers.length - 1)];
+      calls += 1;
+      if (answer instanceof Error) throw answer;
+      return answer as any;
+    });
+    return { signerKeypair, calls: () => calls };
+  }
+
+  function burn(signerKeypair: Keypair) {
+    return {
+      amountRaw: 10_000_000n,
+      destinationDomain: 26,
+      mintRecipientBytes32: stellarAddressToBytes32(Keypair.random().publicKey()) as `0x${string}`,
+      maxFeeRaw: 1000n,
+      minFinalityThreshold: 2000,
+      signer: { publicKey: signerKeypair.publicKey(), keypair: signerKeypair },
+      network: "testnet" as const,
+    };
+  }
+
+  it("returns the hash when N-1 transient RPC errors are followed by a confirmation", async () => {
+    const transientCount = STELLAR_MAX_CONSECUTIVE_RPC_FAILURES - 1;
+    const answers: Array<{ status: string } | Error> = [
+      ...Array.from({ length: transientCount }, () => new Error(TRANSIENT)),
+      { status: "SUCCESS" },
+    ];
+    const { signerKeypair, calls } = mockSubmitWithTransactionSequence(answers);
+
+    await expect(burnUsdcOnStellar(burn(signerKeypair))).resolves.toBe(FAKE_HASH);
+    expect(calls()).toBe(transientCount + 1);
+  }, 30_000);
+
+  it("surfaces the hash via SubmissionTimeoutError when every poll fails transiently", async () => {
+    const { signerKeypair, calls } = mockSubmitWithTransactionSequence([new Error(TRANSIENT)]);
+
+    const error = await burnUsdcOnStellar(burn(signerKeypair)).catch((err) => err);
+
+    expect(error).toBeInstanceOf(SubmissionTimeoutError);
+    expect((error as SubmissionTimeoutError).hash).toBe(FAKE_HASH);
+    // Sustained failure ends the poll instead of waiting out the 120s confirmation deadline.
+    expect(calls()).toBe(STELLAR_MAX_CONSECUTIVE_RPC_FAILURES);
+  }, 30_000);
+
+  it("rejects immediately on a terminal FAILED status without exhausting retries", async () => {
+    const { signerKeypair, calls } = mockSubmitWithTransactionSequence([
+      new Error(TRANSIENT),
+      { status: "FAILED" },
+    ]);
+
+    await expect(burnUsdcOnStellar(burn(signerKeypair))).rejects.toThrow(/failed/);
+    expect(calls()).toBe(2);
+  }, 30_000);
 });

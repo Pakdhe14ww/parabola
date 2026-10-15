@@ -93,6 +93,20 @@ export const STELLAR_TX_TIMEOUT_SECONDS = 180;
 // SubmissionTimeoutError in src/errors.ts).
 export const STELLAR_CONFIRMATION_TIMEOUT_MS = 120_000;
 
+// Consecutive unusable responses tolerated while polling a Stellar transaction's
+// confirmation before giving up. A single dropped connection or 5xx from the Soroban RPC
+// is a normal blip, and failing on one of them before the deadline discards the only
+// handle a caller has for a transaction that was already broadcast. Sustained failure is
+// different: it means something polling cannot fix, so it is surfaced rather than hidden
+// behind the confirmation deadline. Mirrors IRIS_MAX_CONSECUTIVE_FAILURES in
+// src/iris/poll.ts.
+export const STELLAR_MAX_CONSECUTIVE_RPC_FAILURES = 5;
+
+// Delay between confirmation polls after an unusable RPC response, in ms. Shorter than the
+// steady-state poll interval because a failed poll carries no information about the
+// transaction: the next usable response is what resolves the uncertainty.
+export const STELLAR_CONFIRMATION_RETRY_DELAY_MS = 500;
+
 // Inclusion fee, in stroops, set on a Soroban transaction before prepareTransaction,
 // which assembles the final fee as this value plus the simulation's minResourceFee.
 // BASE_FEE (100) leaves no headroom to absorb an increase in the resource fee between
