@@ -24,11 +24,38 @@ export function stellarAddressToBytes32(address: string): `0x${string}` {
   return pad(toHex(raw), { size: 32 });
 }
 
-/** Inverse of stellarAddressToBytes32 for ed25519 public keys (G... accounts). */
-export function bytes32ToStellarAddress(bytes32: `0x${string}`): string {
-  const hex = bytes32.startsWith("0x") ? bytes32.slice(2) : bytes32;
-  const raw = Buffer.from(hex, "hex");
-  return StrKey.encodeEd25519PublicKey(raw);
+const STELLAR_KEY_BYTES32_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+
+/**
+ * Inverse of stellarAddressToBytes32: reads a CCTP 32-byte recipient field back into a
+ * Stellar strkey.
+ *
+ * The 32 bytes are a raw ed25519 public key or contract id with the strkey version byte
+ * stripped, so the bytes alone do not say which strkey kind they came from — both are 32
+ * bytes and both pad to the same width. `strkeyKind` states that, defaulting to the
+ * ed25519 public key (`"ed25519"`, a G... account) that this function has always returned.
+ * Pass `"contract"` for a C... contract id such as the CctpForwarder, which is decoded with
+ * StrKey.encodeContract instead; leaving it at the default would produce a valid-looking
+ * G... address that is not the contract that was encoded.
+ */
+export function bytes32ToStellarAddress(
+  bytes32: `0x${string}`,
+  strkeyKind: "ed25519" | "contract" = "ed25519",
+): string {
+  // Buffer.from(hex, "hex") is forgiving in two ways that matter here: it stops at the first
+  // non-hex character and it drops the leading nibble of an odd-length string. Either one
+  // turns a malformed recipient into a plausible-looking address, and since this value
+  // decides where a mint is sent, that is a funds-loss path rather than a cosmetic bug.
+  // Validate the shape before decoding anything.
+  if (typeof bytes32 !== "string" || !STELLAR_KEY_BYTES32_PATTERN.test(bytes32)) {
+    throw new Error(
+      `Invalid CCTP recipient: expected a 0x-prefixed 32-byte hex string, got ${JSON.stringify(bytes32)}`,
+    );
+  }
+  const raw = Buffer.from(bytes32.slice(2), "hex");
+  return strkeyKind === "contract"
+    ? StrKey.encodeContract(raw)
+    : StrKey.encodeEd25519PublicKey(raw);
 }
 
 /**

@@ -137,3 +137,64 @@ describe("convertPrecision", () => {
     expect(convertPrecision(123n, 6, 6)).toBe(123n);
   });
 });
+
+describe("bytes32ToStellarAddress input validation", () => {
+  const valid = `0x${"ab".repeat(32)}` as const;
+
+  it("rejects a value with no 0x prefix", () => {
+    expect(() => bytes32ToStellarAddress("ab".repeat(32) as `0x${string}`)).toThrow(
+      /expected a 0x-prefixed 32-byte hex string/,
+    );
+  });
+
+  it("rejects an odd-length hex string instead of dropping the leading nibble", () => {
+    // Buffer.from would decode this to 31 bytes after discarding the first nibble.
+    expect(() => bytes32ToStellarAddress(`0x${"a".repeat(63)}` as `0x${string}`)).toThrow(
+      /expected a 0x-prefixed 32-byte hex string/,
+    );
+  });
+
+  it("rejects non-hex characters instead of truncating at them", () => {
+    // Buffer.from stops at "zz" and would have silently decoded the 62 hex chars before it.
+    expect(() => bytes32ToStellarAddress(`0x${"a".repeat(62)}zz` as `0x${string}`)).toThrow(
+      /expected a 0x-prefixed 32-byte hex string/,
+    );
+  });
+
+  it("rejects a 31-byte and a 33-byte value", () => {
+    expect(() => bytes32ToStellarAddress(`0x${"ab".repeat(31)}` as `0x${string}`)).toThrow(
+      /expected a 0x-prefixed 32-byte hex string/,
+    );
+    expect(() => bytes32ToStellarAddress(`0x${"ab".repeat(33)}` as `0x${string}`)).toThrow(
+      /expected a 0x-prefixed 32-byte hex string/,
+    );
+  });
+
+  it("round-trips a G... account through both directions", () => {
+    const address = Keypair.random().publicKey();
+
+    expect(bytes32ToStellarAddress(stellarAddressToBytes32(address))).toBe(address);
+  });
+
+  it("reads a C... contract id back as a contract strkey when told the bytes are one", () => {
+    const raw = Buffer.alloc(32, 9);
+    const contractAddress = StrKey.encodeContract(raw);
+
+    expect(bytes32ToStellarAddress(stellarAddressToBytes32(contractAddress), "contract")).toBe(
+      contractAddress,
+    );
+  });
+
+  it("defaults to an ed25519 strkey for the same 32 bytes, which is a different G... address", () => {
+    // Documents the ambiguity: the strkey version byte is not part of the CCTP payload, so
+    // the default produces the G... form of the same key rather than the C... id.
+    const raw = Buffer.alloc(32, 9);
+    const contractAddress = StrKey.encodeContract(raw);
+
+    const asEd25519 = bytes32ToStellarAddress(stellarAddressToBytes32(contractAddress));
+
+    expect(asEd25519).not.toBe(contractAddress);
+    expect(StrKey.isValidEd25519PublicKey(asEd25519)).toBe(true);
+    expect(raw.equals(StrKey.decodeEd25519PublicKey(asEd25519))).toBe(true);
+  });
+});
