@@ -38,6 +38,30 @@ const BODY_OFFSET = {
 /** Every CCTP V2 message header is this long, and every burn body at least this long. */
 const V2_BURN_MESSAGE_MINIMUM_LENGTH = BODY_OFFSET.hookData;
 
+/**
+ * The only message header version this decoder understands. Circle's technical guide defines
+ * the header's `version` field as "Version identifier - use 1 for CCTP"
+ * (developers.circle.com/cctp/references/technical-guide#message-header), and the live
+ * testnet message in tests/message.test.ts decodes to 1 here, which pins the value against
+ * bytes Circle actually produced rather than against an assumption.
+ */
+const SUPPORTED_MESSAGE_VERSION = 1;
+
+/**
+ * The only burn body version this decoder understands, read the same way: Circle documents
+ * the body's `version` field as "Version identifier - use 1 for CCTP"
+ * (technical-guide#message-body), and the live testnet fixture decodes to 1.
+ */
+const SUPPORTED_BURN_BODY_VERSION = 1;
+
+function assertSupportedVersion(field: string, found: number, expected: number): void {
+  if (found !== expected) {
+    throw new Error(
+      `Unsupported CCTP ${field} version ${found}; this decoder supports version ${expected} only`,
+    );
+  }
+}
+
 export interface CctpBurnMessage {
   version: number;
   sourceDomain: number;
@@ -84,6 +108,11 @@ function readBytes32(raw: Buffer, offset: number): `0x${string}` {
  * Decodes a CCTP V2 burn message into its header and body fields. Every message this SDK
  * produces or completes is a burn message, so the body is decoded as one; a message whose
  * body is not a burn body is rejected by the length check rather than misread.
+ *
+ * The header version and the burn body version are validated before anything else is read.
+ * Everything this function returns is decoded at fixed V2 offsets, so a message carrying a
+ * version this decoder does not implement is rejected instead of being decoded into
+ * plausible-looking values that callers would then act on.
  */
 export function decodeCctpMessage(message: string): CctpBurnMessage {
   const raw = hexToBuffer(message);
@@ -93,12 +122,22 @@ export function decodeCctpMessage(message: string): CctpBurnMessage {
     );
   }
 
+  // Version first, before any other field is read: every field below is decoded at an
+  // offset that only holds for the layout this decoder knows. A message in a format it
+  // cannot read would otherwise decode into confidently wrong values — a wrong amount or a
+  // wrong recipient — which completeMint and resolveBurn would then act on.
+  const version = raw.readUInt32BE(HEADER_OFFSET.version);
+  assertSupportedVersion("message header", version, SUPPORTED_MESSAGE_VERSION);
+
+  const burnBodyVersion = raw.readUInt32BE(BODY_OFFSET.version);
+  assertSupportedVersion("burn body", burnBodyVersion, SUPPORTED_BURN_BODY_VERSION);
+
   const hookBytes = raw.subarray(BODY_OFFSET.hookData);
   const hookData =
     hookBytes.length > 0 ? (`0x${hookBytes.toString("hex")}` as `0x${string}`) : null;
 
   return {
-    version: raw.readUInt32BE(HEADER_OFFSET.version),
+    version,
     sourceDomain: raw.readUInt32BE(HEADER_OFFSET.sourceDomain),
     destinationDomain: raw.readUInt32BE(HEADER_OFFSET.destinationDomain),
     nonce: readBytes32(raw, HEADER_OFFSET.nonce),
@@ -107,7 +146,7 @@ export function decodeCctpMessage(message: string): CctpBurnMessage {
     destinationCaller: readBytes32(raw, HEADER_OFFSET.destinationCaller),
     minFinalityThreshold: raw.readUInt32BE(HEADER_OFFSET.minFinalityThreshold),
     finalityThresholdExecuted: raw.readUInt32BE(HEADER_OFFSET.finalityThresholdExecuted),
-    burnBodyVersion: raw.readUInt32BE(BODY_OFFSET.version),
+    burnBodyVersion,
     burnToken: readBytes32(raw, BODY_OFFSET.burnToken),
     mintRecipient: readBytes32(raw, BODY_OFFSET.mintRecipient),
     amountRaw: BigInt(readBytes32(raw, BODY_OFFSET.amount)),

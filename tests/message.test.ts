@@ -111,3 +111,50 @@ describe("decodeStellarForwardHook", () => {
     ).toBeUndefined();
   });
 });
+
+/**
+ * Rewrites one 4-byte uint32 field in a message fixture, so a version-rejection case is built
+ * from the same bytes Circle produced instead of a hand-assembled message that could differ
+ * from the real layout in other ways.
+ */
+function withUint32At(message: string, byteOffset: number, value: number): string {
+  const head = message.slice(0, 2 + byteOffset * 2);
+  const field = message.slice(2 + byteOffset * 2, 2 + (byteOffset + 4) * 2);
+  const tail = message.slice(2 + (byteOffset + 4) * 2);
+  return head + value.toString(16).padStart(field.length, "0") + tail;
+}
+
+describe("decodeCctpMessage version validation", () => {
+  it("rejects a message whose header version is not the supported one", () => {
+    const wrongHeaderVersion = withUint32At(LIVE_TESTNET_BURN_MESSAGE, 0, 3);
+
+    expect(() => decodeCctpMessage(wrongHeaderVersion)).toThrow(
+      /Unsupported CCTP message header version 3; this decoder supports version 1 only/,
+    );
+  });
+
+  it("rejects a burn body whose version is not the supported one", () => {
+    const wrongBodyVersion = withUint32At(LIVE_TESTNET_BURN_MESSAGE, 148, 2);
+
+    expect(() => decodeCctpMessage(wrongBodyVersion)).toThrow(
+      /Unsupported CCTP burn body version 2; this decoder supports version 1 only/,
+    );
+  });
+
+  it("names both the found and the expected version in the error", () => {
+    const wrongBodyVersion = withUint32At(LIVE_TESTNET_BURN_MESSAGE, 148, 0);
+
+    // A caller needs to tell "Circle shipped a newer format" (expected > found) apart from
+    // "this is not a CCTP burn message at all" (found 0), and the message has to say which.
+    expect(() => decodeCctpMessage(wrongBodyVersion)).toThrow(/version 0/);
+    expect(() => decodeCctpMessage(wrongBodyVersion)).toThrow(/supports version 1/);
+  });
+
+  it("does not decode any other field once the header version is unsupported", () => {
+    // A V3 header would be rejected before the amount at the V2 offset could be reported, so
+    // a concurrent 99_999_999 amount never reaches the caller.
+    const tampered = withUint32At(withUint32At(LIVE_TESTNET_BURN_MESSAGE, 0, 3), 216, 99_999_999);
+
+    expect(() => decodeCctpMessage(tampered)).toThrow(/Unsupported CCTP message header version/);
+  });
+});
